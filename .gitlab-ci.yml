@@ -1,0 +1,126 @@
+variables:
+  TF_ROOT: terraform
+
+stages:
+  - build
+  - move
+  - plan
+  - apply
+  - healthcheck
+  - destroy
+
+build:
+  variables:
+    MAVEN_OPTS: "-Dmaven.repo.local=./.m2/repository"
+  image: maven:latest
+  stage: build
+  script:
+    - mvn package -DskipTests=true -Dcheckstyle.skip
+    - mv target/*.jar target/petclinic.jar
+  artifacts:
+    paths:
+      - ${CI_PROJECT_DIR}/target/petclinic.jar
+  cache:
+    paths:
+      - ./.m2/repository
+  only:
+    refs:
+      - master
+  tags:
+    - test
+
+
+move:
+  image: registry.gitlab.com/gitlab-org/cloud-deploy/aws-base:latest
+  stage: move
+  script:
+    - aws s3 mv target/petclinic.jar s3://demo3-mahammadjan/petclinic.jar
+  dependencies:
+    - build
+  needs:
+    - build
+  only:
+    refs:
+      - master
+  tags:
+    - test
+
+
+image: registry.gitlab.com/gitlab-org/terraform-images/stable:latest
+
+
+plan:
+  stage: plan
+  script:
+    - cd ${TF_ROOT}
+    - gitlab-terraform init
+    - gitlab-terraform plan
+  artifacts:
+    paths:
+      - ${TF_ROOT}/plan.cache
+  needs:
+    - move
+  only:
+    refs:
+      - master
+  tags:
+    - test
+
+apply:
+  stage: apply
+  script:
+    - cd ${TF_ROOT}
+    - gitlab-terraform apply
+    - gitlab-terraform output -raw app_ip > app_ip.txt
+  dependencies:
+    - plan
+  artifacts:
+    paths:
+      - ${TF_ROOT}/*.tfstate
+      - ${TF_ROOT}/app_ip.txt
+  needs:
+    - plan
+  only:
+    refs:
+      - master
+  tags:
+    - test
+
+healthcheck:
+  stage: healthcheck
+  script:
+    - cd ${TF_ROOT}
+    - app_ip=$(cat app_ip.txt)
+    - sleep 120
+    - curl http://$app_ip:8080/actuator/health -o response.txt
+    - response=$(cat response.txt)
+    - if [ $response == '{"status":"UP"}' ]; then exit 0; else exit 1; fi
+  dependencies:
+    - apply
+  needs:
+    - apply
+  only:
+    refs:
+      - master
+  artifacts:
+    paths:
+      - ${TF_ROOT}/*.tfstate
+  tags:
+    - test
+
+#comment
+destroy:
+  stage: destroy
+  script:
+    - cd ${TF_ROOT}
+    - gitlab-terraform destroy
+  dependencies:
+    - healthcheck
+  needs:
+    - healthcheck
+  when: always
+  only:
+    refs:
+      - master
+  tags:
+    - test
